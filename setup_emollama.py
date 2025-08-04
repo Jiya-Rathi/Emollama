@@ -1,20 +1,43 @@
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, TaskType
+from huggingface_hub import login
+import os
 
-# === Step 1: Load CounselChat from Hugging Face (Cloud Download)
-def format_example(example):
+# === Authentication
+print("🔐 Logging into Hugging Face...")
+login()
+
+# === Step 1: Load and format datasets
+def format_counsel_chat(example):
     return {
-        "instruction": example["context"],
-        "output": example["response"]
+        "instruction": example['questionText'],
+        "output": example["answerText"]
     }
 
-print("📥 Loading CounselChat dataset...")
-dataset = load_dataset("counsel-chat")
-formatted_dataset = dataset["train"].map(format_example)
+def format_amod_dataset(example):
+    return {
+        "instruction": example['Context'],
+        "output": example['Response']
+    }
 
-# === Step 2: Setup 4-bit Quantization (BitsAndBytes)
+print("📥 Loading nbertagnolli/counsel-chat...")
+counsel_chat = load_dataset("nbertagnolli/counsel-chat")["train"].map(format_counsel_chat)
+
+print("📥 Loading Amod/mental_health_counseling_conversations...")
+amod = load_dataset("Amod/mental_health_counseling_conversations")["train"].map(format_amod_dataset)
+
+# === Step 2: Combine and shuffle
+print("🔗 Combining and shuffling datasets...")
+combined_dataset = concatenate_datasets([counsel_chat, amod]).shuffle(seed=42)
+
+# === Step 3: Save combined dataset to JSONL
+save_path = "combined_mental_health_dataset.jsonl"
+print(f"💾 Saving combined dataset to: {save_path}")
+combined_dataset.to_json(save_path, orient="records", lines=True)
+
+# === Step 4: Load LLaMA-2 with 4-bit quantization
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
@@ -22,18 +45,19 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_compute_dtype=torch.float16
 )
 
-# === Step 3: Load LLaMA-2-7B model and tokenizer
 model_name = "meta-llama/Llama-2-7b-hf"
 print(f"📦 Loading {model_name} in 4-bit...")
 
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+tokenizer.pad_token = tokenizer.eos_token  # Prevent tokenizer issues during training
+
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     quantization_config=bnb_config,
     device_map="auto"
 )
 
-# === Step 4: LoRA Configuration
+# === Step 5: Apply LoRA
 peft_config = LoraConfig(
     task_type=TaskType.CAUSAL_LM,
     r=8,
@@ -44,9 +68,13 @@ peft_config = LoraConfig(
 
 model = get_peft_model(model, peft_config)
 
-# === Confirm Everything Works
-print("\n✅ Model loaded and LoRA applied.")
-print(f"Total samples in CounselChat: {len(formatted_dataset)}")
-print("🔍 Sample:")
-print("Instruction:", formatted_dataset[0]["instruction"])
-print("Response:", formatted_dataset[0]["output"])
+# === Summary Output
+print("\n✅ Setup complete!")
+print(f"Total combined samples: {len(combined_dataset)}")
+print(f"- CounselChat samples: {len(counsel_chat)}")
+print(f"- Amod samples: {len(amod)}")
+
+# Sample Preview
+print("\n🔍 Sample entry:")
+print("Instruction:", combined_dataset[0]["instruction"])
+print("Response:", combined_dataset[0]["output"])
